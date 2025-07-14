@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Этап 2: Миграция проектов из Yandex Tracker в YouTrack
-Создает проекты со статусами и сохраняет маппинг
+Создает проекты со статусами через state bundles и сохраняет маппинг
 """
 
 import requests
@@ -59,8 +59,14 @@ class YandexTrackerClient:
             logger.debug(f"Получено {len(statuses)} статусов для очереди {queue_key}")
             return statuses
         except requests.RequestException as e:
-            logger.error(f"Ошибка получения статусов для очереди {queue_key}: {e}")
-            return []
+            logger.warning(f"Ошибка получения статусов для очереди {queue_key}: {e}")
+            # Возвращаем базовые статусы в случае ошибки
+            return [
+                {'name': 'Open', 'key': 'open', 'color': '#6B73FF'},
+                {'name': 'In Progress', 'key': 'inprogress', 'color': '#FFA500'},
+                {'name': 'Resolved', 'key': 'resolved', 'color': '#00AA00'},
+                {'name': 'Closed', 'key': 'closed', 'color': '#808080'}
+            ]
 
 class YouTrackClient:
     """Клиент для работы с YouTrack API"""
@@ -75,15 +81,39 @@ class YouTrackClient:
             'Accept': 'application/json'
         })
 
-    def create_project(self, project_data: Dict, leader_id: str) -> Optional[str]:
+    def get_current_user_youtrack_id(self) -> Optional[str]:
+        """Получение YouTrack ID текущего пользователя"""
+        try:
+            response = self.session.get(f"{self.base_url}/api/users/me")
+            if response.status_code == 200:
+                user = response.json()
+                youtrack_id = user.get('id')
+                logger.debug(f"Текущий пользователь YouTrack ID: {youtrack_id}")
+                return youtrack_id
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка получения текущего пользователя: {e}")
+            return None
+
+    def create_project(self, project_data: Dict, leader_id: str = None) -> Optional[str]:
         """Создание проекта в YouTrack"""
         try:
+            # Используем текущего пользователя как лидера проекта
+            if not leader_id:
+                leader_id = self.get_current_user_youtrack_id()
+
+            if not leader_id:
+                logger.error("Не удалось определить ID лидера проекта")
+                return None
+
             yt_project = {
                 'name': project_data.get('name'),
                 'shortName': project_data.get('key'),
                 'description': project_data.get('description', ''),
                 'leader': {'id': leader_id}
             }
+
+            logger.debug(f"Создаем проект: {yt_project['shortName']} с лидером ID: {leader_id}")
 
             response = self.session.post(
                 f"{self.base_url}/api/admin/projects",
@@ -111,10 +141,7 @@ class YouTrackClient:
         try:
             response = self.session.get(
                 f"{self.base_url}/api/admin/projects",
-                params={
-                    'query': shortname,
-                    'fields': 'id,shortName'
-                }
+                params={'query': shortname, 'fields': 'id,shortName'}
             )
             response.raise_for_status()
             projects = response.json()
@@ -122,57 +149,110 @@ class YouTrackClient:
             for project in projects:
                 if project.get('shortName') == shortname:
                     return project.get('id')
-
             return None
-
         except requests.RequestException as e:
             logger.error(f"Ошибка поиска проекта {shortname}: {e}")
             return None
 
-    def create_project_statuses(self, project_id: str, statuses: List[Dict]) -> bool:
-        """Создание статусов для проекта"""
+    def create_state_bundle(self, bundle_name: str, statuses: List[Dict]) -> Optional[str]:
+        """Создание state bundle в YouTrack"""
         try:
-            # Получаем существующие статусы проекта
-            response = self.session.get(
-                f"{self.base_url}/api/admin/projects/{project_id}/statuses",
-                params={'fields': 'id,name'}
+            # Подготавливаем состояния для bundle
+            bundle_states = []
+            for status in statuses:
+                state_data = {
+                    'name': status.get('name', status.get('key')),
+                    'description': status.get('description', ''),
+                    'color': {'id': status.get('color', '#6B73FF').replace('#', '')}
+                }
+                bundle_states.append(state_data)
+
+            bundle_data = {
+                'name': bundle_name,
+                'states': bundle_states
+            }
+
+            response = self.session.post(
+                f"{self.base_url}/api/admin/customFieldSettings/bundles/state",
+                json=bundle_data,
+                params={'fields': 'id,name,states(id,name)'}
             )
 
-            if response.status_code != 200:
-                logger.error(f"Не удалось получить статусы проекта {project_id}")
+            if response.status_code in [200, 201]:
+                created_bundle = response.json()
+                logger.debug(f"  ✓ Создан state bundle: {bundle_name}")
+                return created_bundle.get('id')
+            else:
+                logger.warning(f"  ⚠ Не удалось создать bundle {bundle_name}: {response.status_code}")
+                return None
+
+        except Exception as e:
+            logger.error(f"  ✗ Ошибка создания state bundle: {e}")
+            return None
+
+    def assign_state_bundle_to_project(self, project_id: str, bundle_id: str) -> bool:
+        """Назначение state bundle проекту"""
+        try:
+            # Находим State field
+            response = self.session.get(
+                f"{self.base_url}/api/admin/customFieldSettings/customFields",
+                params={'fields': 'id,name,fieldType', '$top': 100}
+            )
+
+            state_field_id = None
+            if response.status_code == 200:
+                fields = response.json()
+                for field in fields:
+                    if field.get('name') == 'State' and 'state' in field.get('fieldType', '').lower():
+                        state_field_id = field.get('id')
+                        break
+
+            if not state_field_id:
+                logger.warning(f"  ⚠ Не найдено поле State")
                 return False
 
-            existing_statuses = {status['name']: status['id'] for status in response.json()}
+            # Назначаем bundle проекту
+            custom_field_data = {
+                'field': {'id': state_field_id},
+                'bundle': {'id': bundle_id}
+            }
 
-            # Создаем недостающие статусы
-            created_count = 0
-            for status in statuses:
-                status_name = status.get('name', status.get('key'))
-                if status_name not in existing_statuses:
-                    status_data = {
-                        'name': status_name,
-                        'description': status.get('description', ''),
-                        'color': status.get('color', '#6B73FF')
-                    }
+            response = self.session.post(
+                f"{self.base_url}/api/admin/projects/{project_id}/customFields",
+                json=custom_field_data,
+                params={'fields': 'id,field(name),bundle(name)'}
+            )
 
-                    create_response = self.session.post(
-                        f"{self.base_url}/api/admin/projects/{project_id}/statuses",
-                        json=status_data,
-                        params={'fields': 'id,name'}
-                    )
+            if response.status_code in [200, 201]:
+                logger.debug(f"  ✓ State bundle назначен проекту")
+                return True
+            elif response.status_code == 409:
+                logger.debug(f"  ⚠ State bundle уже назначен проекту")
+                return True
+            else:
+                logger.warning(f"  ⚠ Не удалось назначить bundle: {response.status_code}")
+                return False
 
-                    if create_response.status_code == 200:
-                        created_count += 1
-                        logger.debug(f"  ✓ Создан статус: {status_name}")
-                    else:
-                        logger.warning(f"  ⚠ Не удалось создать статус {status_name}: {create_response.status_code}")
-
-            logger.info(f"  📋 Создано {created_count} новых статусов для проекта")
-            return True
-
-        except requests.RequestException as e:
-            logger.error(f"Ошибка создания статусов: {e}")
+        except Exception as e:
+            logger.error(f"  ✗ Ошибка назначения state bundle: {e}")
             return False
+
+    def create_project_statuses(self, project_id: str, queue_key: str, statuses: List[Dict]) -> bool:
+        """Создание статусов для проекта через state bundle"""
+        if not statuses:
+            logger.warning(f"  ⚠ Нет статусов для создания")
+            return False
+
+        # Создаем уникальное имя для bundle
+        bundle_name = f"{queue_key} States"
+
+        # Создаем state bundle
+        bundle_id = self.create_state_bundle(bundle_name, statuses)
+        if not bundle_id:
+            return False
+
+        # Назначаем bundle проекту
+        return self.assign_state_bundle_to_project(project_id, bundle_id)
 
 def load_config() -> Dict:
     """Загрузка конфигурации"""
@@ -205,7 +285,7 @@ def save_project_mapping(project_mapping: Dict):
     with open('project_mapping.json', 'w', encoding='utf-8') as f:
         json.dump(mapping_data, f, ensure_ascii=False, indent=2)
 
-    logger.info(f"Маппинг проектов сохранен в project_mapping.json")
+    logger.debug(f"Маппинг проектов сохранен в project_mapping.json")
 
 def load_existing_project_mapping() -> Dict:
     """Загрузка существующего маппинга проектов"""
@@ -236,7 +316,7 @@ def main():
 
     # Создаем клиентов
     is_cloud_org = config['yandex_tracker'].get('is_cloud_org', False)
-    
+
     yandex_client = YandexTrackerClient(
         config['yandex_tracker']['token'],
         config['yandex_tracker']['org_id'],
@@ -258,18 +338,14 @@ def main():
         logger.error("Не удалось получить очереди из Yandex Tracker")
         exit(1)
 
-    # Выбираем лидера проекта (первый доступный пользователь)
-    default_leader_id = next(iter(user_mapping.values())) if user_mapping else None
-    if not default_leader_id:
-        logger.error("Нет доступных пользователей для назначения лидером проекта")
-        exit(1)
-
     logger.info(f"Начинаем миграцию {len(yandex_queues)} проектов...")
 
     # Мигрируем проекты
     success_count = 0
     skip_count = 0
     error_count = 0
+    status_success_count = 0
+    status_error_count = 0
 
     for i, queue in enumerate(yandex_queues, 1):
         queue_key = queue.get('key')
@@ -284,18 +360,21 @@ def main():
             continue
 
         # Создаем проект
-        project_id = youtrack_client.create_project(queue, default_leader_id)
+        project_id = youtrack_client.create_project(queue)
         if project_id:
             project_mapping[queue_key] = project_id
             success_count += 1
 
-            # Создаем статусы для проекта
+            # Создаем статусы для проекта через state bundle
             logger.info(f"  🔧 Настраиваем статусы для проекта {queue_key}")
             statuses = yandex_client.get_queue_statuses(queue_key)
-            if statuses:
-                youtrack_client.create_project_statuses(project_id, statuses)
+
+            if youtrack_client.create_project_statuses(project_id, queue_key, statuses):
+                status_success_count += 1
+                logger.info(f"  ✓ Статусы настроены для проекта {queue_key}")
             else:
-                logger.warning(f"  ⚠ Не удалось получить статусы для проекта {queue_key}")
+                status_error_count += 1
+                logger.warning(f"  ⚠ Не удалось настроить статусы для проекта {queue_key}")
         else:
             error_count += 1
 
@@ -313,9 +392,11 @@ def main():
     # Выводим статистику
     logger.info("=" * 50)
     logger.info("РЕЗУЛЬТАТЫ ЭТАПА 2:")
-    logger.info(f"✓ Успешно создано: {success_count}")
+    logger.info(f"✓ Успешно создано проектов: {success_count}")
     logger.info(f"⏭ Пропущено (уже существуют): {skip_count}")
-    logger.info(f"✗ Ошибок: {error_count}")
+    logger.info(f"✗ Ошибок создания проектов: {error_count}")
+    logger.info(f"✓ Статусы настроены: {status_success_count}")
+    logger.info(f"⚠ Ошибок настройки статусов: {status_error_count}")
     logger.info(f"📊 Всего в маппинге: {len(project_mapping)}")
     logger.info("=" * 50)
 
