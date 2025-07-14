@@ -78,43 +78,81 @@ class YouTrackClient:
             logger.error(f"✗ YouTrack: ошибка подключения - {e}")
             return False
 
+    
     def create_user(self, user_data: Dict) -> Optional[str]:
-        """Создание пользователя в YouTrack через Hub API"""
+        """Создание пользователя в YouTrack с email аутентификацией"""
         try:
-            hub_url = f"{self.base_url}/hub/api/rest/users"
-
             # Подготавливаем данные пользователя
-            yt_user = {
-                'login': user_data.get('login', user_data.get('id')),
-                'name': user_data.get('display', user_data.get('login')),
-                'email': user_data.get('email'),
+            login = user_data.get('login', user_data.get('id'))
+            email = user_data.get('email')
+            display_name = user_data.get('display', login)
+            
+            if not email:
+                logger.warning(f"⚠ У пользователя {login} нет email, пропускаем")
+                return None
+            
+            # Сначала создаем базовую запись пользователя через Hub API
+            hub_url = f"{self.base_url}/hub/api/rest/users"
+            
+            hub_user = {
+                'login': login,
+                'name': display_name,
+                'email': email,
                 'isActive': True
             }
-
-            # Удаляем None значения
-            yt_user = {k: v for k, v in yt_user.items() if v is not None}
-
+            
             response = self.session.post(
                 hub_url,
-                json=yt_user,
-                params={'fields': 'id,login,name'}
+                json=hub_user,
+                params={'fields': 'id,login,name,email'}
             )
-
-            if response.status_code == 201:
+            
+            if response.status_code in [200, 201]:
                 created_user = response.json()
-                logger.info(f"✓ Создан пользователь: {created_user.get('login')}")
-                return created_user.get('id')
+                user_id = created_user.get('id')
+                logger.info(f"✓ Создана базовая запись: {login}")
+                
+                # Теперь добавляем email аутентификацию
+                self._add_email_authentication(user_id, email, login)
+                
+                return user_id
+                
             elif response.status_code == 409:
-                logger.warning(f"⚠ Пользователь {yt_user['login']} уже существует")
-                return self.get_user_by_login(yt_user['login'])
+                logger.warning(f"⚠ Пользователь {login} уже существует")
+                return self.get_user_by_login(login)
             else:
-                logger.error(f"✗ Ошибка создания пользователя {yt_user['login']}: {response.status_code} - {response.text}")
+                logger.error(f"✗ Ошибка создания пользователя {login}: {response.status_code} - {response.text}")
                 return None
-
+                
         except requests.RequestException as e:
             logger.error(f"✗ Ошибка создания пользователя: {e}")
             return None
-
+    
+    def _add_email_authentication(self, user_id: str, email: str, login: str):
+        """Добавление email аутентификации для пользователя"""
+        try:
+            # Создаем временный пароль
+            temp_password = f"TempPass123_{login[-4:]}"
+            
+            # Добавляем email credential через Hub API
+            credentials_url = f"{self.base_url}/hub/api/rest/users/{user_id}/credentials"
+            
+            credential_data = {
+                'email': email,
+                'password': temp_password,
+                'changeOnLogin': True  # Заставит пользователя сменить пароль при первом входе
+            }
+            
+            response = self.session.post(credentials_url, json=credential_data)
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"  📧 Email аутентификация добавлена для {login}")
+                logger.info(f"  🔑 Временный пароль: {temp_password}")
+            else:
+                logger.warning(f"  ⚠ Не удалось добавить email аутентификацию: {response.status_code}")
+                
+        except Exception as e:
+            logger.warning(f"  ⚠ Ошибка добавления email аутентификации: {e}")
     def get_user_by_login(self, login: str) -> Optional[str]:
         """Получение ID пользователя по логину"""
         try:

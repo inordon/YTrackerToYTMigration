@@ -91,7 +91,7 @@ class YouTrackClient:
                 params={'fields': 'id,shortName,name'}
             )
 
-            if response.status_code == 200:
+            if response.status_code in [200, 201]:
                 created_project = response.json()
                 logger.info(f"✓ Создан проект: {created_project.get('shortName')} - {created_project.get('name')}")
                 return created_project.get('id')

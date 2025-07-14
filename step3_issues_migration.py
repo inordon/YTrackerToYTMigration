@@ -122,7 +122,7 @@ class YouTrackClient:
                 params={'fields': 'id,idReadable'}
             )
 
-            if response.status_code == 200:
+            if response.status_code in [200, 201]:
                 created_issue = response.json()
                 logger.debug(f"    ✓ Создана задача: {created_issue.get('idReadable')}")
                 return created_issue.get('id')
@@ -152,7 +152,7 @@ class YouTrackClient:
                 params={'fields': 'id'}
             )
 
-            if response.status_code == 200:
+            if response.status_code in [200, 201]:
                 logger.debug(f"      💬 Добавлен комментарий к задаче")
                 return True
             else:
