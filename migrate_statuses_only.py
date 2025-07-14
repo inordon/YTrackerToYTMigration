@@ -63,8 +63,8 @@ class YouTrackClient:
             'Accept': 'application/json'
         })
 
-    def project_has_state_bundle(self, project_id: str) -> bool:
-        """Проверка, есть ли у проекта уже настроенные состояния"""
+    def project_has_custom_state_bundle(self, project_id: str, queue_key: str) -> bool:
+        """Проверка, есть ли у проекта кастомный state bundle для данной очереди"""
         try:
             response = self.session.get(
                 f"{self.base_url}/api/admin/projects/{project_id}/customFields",
@@ -76,9 +76,17 @@ class YouTrackClient:
                 for field in custom_fields:
                     if field.get('field', {}).get('name') == 'State':
                         bundle_name = field.get('bundle', {}).get('name', '')
-                        if bundle_name:
-                            logger.debug(f"    ✓ Проект уже имеет state bundle: {bundle_name}")
+                        # Проверяем, что это НАШ bundle для данной очереди
+                        expected_bundle_name = f"{queue_key} States"
+                        if bundle_name == expected_bundle_name:
+                            logger.debug(f"    ✓ Проект уже имеет наш state bundle: {bundle_name}")
                             return True
+                        elif bundle_name and not bundle_name.startswith('Default'):
+                            logger.info(f"    🔄 Проект имеет другой bundle: {bundle_name}, заменим на наш")
+                            return False
+                        else:
+                            logger.info(f"    🔄 Проект имеет дефолтный bundle: {bundle_name}, заменим на наш")
+                            return False
             return False
         except Exception as e:
             logger.debug(f"    Ошибка проверки state bundle: {e}")
@@ -120,10 +128,10 @@ class YouTrackClient:
             logger.error(f"    ✗ Ошибка создания state bundle: {e}")
             return None
 
-    def assign_state_bundle_to_project(self, project_id: str, bundle_id: str) -> bool:
-        """Назначение state bundle проекту"""
+    def replace_state_bundle_for_project(self, project_id: str, bundle_id: str) -> bool:
+        """Замена существующего state bundle проекту на новый"""
         try:
-            # Находим State field
+            # Сначала находим State field
             response = self.session.get(
                 f"{self.base_url}/api/admin/customFieldSettings/customFields",
                 params={'fields': 'id,name,fieldType', '$top': 100}
@@ -141,7 +149,36 @@ class YouTrackClient:
                 logger.warning(f"    ⚠ Не найдено поле State")
                 return False
 
-            # Назначаем bundle проекту
+            # Проверяем текущие custom fields проекта
+            response = self.session.get(
+                f"{self.base_url}/api/admin/projects/{project_id}/customFields",
+                params={'fields': 'id,field(id,name),bundle(id,name)'}
+            )
+
+            project_state_field_id = None
+            if response.status_code == 200:
+                custom_fields = response.json()
+                for field in custom_fields:
+                    if field.get('field', {}).get('name') == 'State':
+                        project_state_field_id = field.get('id')
+                        break
+
+            # Если поле State уже есть в проекте, обновляем его bundle
+            if project_state_field_id:
+                response = self.session.post(
+                    f"{self.base_url}/api/admin/projects/{project_id}/customFields/{project_state_field_id}",
+                    json={'bundle': {'id': bundle_id}},
+                    params={'fields': 'id,field(name),bundle(name)'}
+                )
+
+                if response.status_code == 200:
+                    logger.info(f"    ✓ State bundle обновлен для проекта")
+                    return True
+                else:
+                    logger.warning(f"    ⚠ Не удалось обновить bundle: {response.status_code}")
+                    # Попробуем добавить как новое поле
+
+            # Добавляем поле State с нашим bundle
             custom_field_data = {
                 'field': {'id': state_field_id},
                 'bundle': {'id': bundle_id}
@@ -164,7 +201,7 @@ class YouTrackClient:
                 return False
 
         except Exception as e:
-            logger.error(f"    ✗ Ошибка назначения state bundle: {e}")
+            logger.error(f"    ✗ Ошибка замены state bundle: {e}")
             return False
 
 def load_config() -> Dict:
@@ -220,9 +257,9 @@ def main():
     for i, (queue_key, project_id) in enumerate(project_mapping.items(), 1):
         logger.info(f"[{i}/{len(project_mapping)}] 📁 Обрабатываем проект: {queue_key}")
 
-        # Проверяем, есть ли уже state bundle
-        if youtrack_client.project_has_state_bundle(project_id):
-            logger.info(f"  ⏭ Проект {queue_key} уже имеет настроенные состояния")
+        # Проверяем, есть ли уже наш кастомный state bundle
+        if youtrack_client.project_has_custom_state_bundle(project_id, queue_key):
+            logger.info(f"  ⏭ Проект {queue_key} уже имеет настроенные состояния из Yandex Tracker")
             skip_count += 1
             continue
 
@@ -243,8 +280,8 @@ def main():
             error_count += 1
             continue
 
-        # Назначаем bundle проекту
-        if youtrack_client.assign_state_bundle_to_project(project_id, bundle_id):
+        # Назначаем bundle проекту (заменяя существующий если нужно)
+        if youtrack_client.replace_state_bundle_for_project(project_id, bundle_id):
             success_count += 1
             logger.info(f"  🎉 Статусы успешно настроены для проекта {queue_key}")
         else:
