@@ -25,14 +25,16 @@ logger = logging.getLogger(__name__)
 class YandexTrackerClient:
     """Клиент для работы с Yandex Tracker API"""
 
-    def __init__(self, token: str, org_id: str):
+    def __init__(self, token: str, org_id: str, is_cloud_org: bool = False):
         self.token = token
         self.org_id = org_id
         self.base_url = "https://api.tracker.yandex.net/v2"
         self.session = requests.Session()
+        # Выбираем правильный заголовок для организации
+        org_header = 'X-Cloud-Org-Id' if is_cloud_org else 'X-Org-ID'
         self.session.headers.update({
             'Authorization': f'OAuth {token}',
-            'X-Org-ID': org_id,
+            org_header: org_id,
             'Content-Type': 'application/json'
         })
 
@@ -190,9 +192,12 @@ def main():
     logger.info(f"Загружен маппинг задач: {len(issue_mapping)} задач")
 
     # Создаем клиентов
+    is_cloud_org = config['yandex_tracker'].get('is_cloud_org', False)
+    
     yandex_client = YandexTrackerClient(
         config['yandex_tracker']['token'],
-        config['yandex_tracker']['org_id']
+        config['yandex_tracker']['org_id'],
+        is_cloud_org
     )
 
     youtrack_client = YouTrackClient(
