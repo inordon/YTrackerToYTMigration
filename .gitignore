@@ -64,6 +64,7 @@ venv.bak/
 *.swp
 *.swo
 *~
+*.iml
 
 # OS
 .DS_Store
