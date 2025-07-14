@@ -92,9 +92,79 @@ class YouTrackClient:
             logger.debug(f"    Ошибка проверки state bundle: {e}")
             return False
 
-    def create_state_bundle(self, bundle_name: str, statuses: List[Dict]) -> Optional[str]:
-        """Создание state bundle в YouTrack"""
+    def remove_existing_state_bundle(self, project_id: str, queue_key: str) -> bool:
+        """Удаление существующего state bundle у проекта"""
         try:
+            # Получаем custom fields проекта
+            response = self.session.get(
+                f"{self.base_url}/api/admin/projects/{project_id}/customFields",
+                params={'fields': 'id,field(id,name),bundle(id,name)'}
+            )
+
+            if response.status_code != 200:
+                logger.warning(f"    ⚠ Не удалось получить поля проекта")
+                return False
+
+            custom_fields = response.json()
+            state_field_config = None
+
+            # Находим конфигурацию поля State
+            for field in custom_fields:
+                if field.get('field', {}).get('name') == 'State':
+                    state_field_config = field
+                    break
+
+            if not state_field_config:
+                logger.debug(f"    ℹ Поле State не найдено в проекте")
+                return True
+
+            project_field_id = state_field_config.get('id')
+            bundle_info = state_field_config.get('bundle', {})
+            bundle_id = bundle_info.get('id')
+            bundle_name = bundle_info.get('name', '')
+
+            logger.info(f"    🗑️ Удаляем существующий bundle: {bundle_name}")
+
+            # Удаляем поле State из проекта
+            if project_field_id:
+                delete_response = self.session.delete(
+                    f"{self.base_url}/api/admin/projects/{project_id}/customFields/{project_field_id}"
+                )
+
+                if delete_response.status_code in [200, 204]:
+                    logger.info(f"    ✓ Поле State удалено из проекта")
+                else:
+                    logger.warning(f"    ⚠ Не удалось удалить поле State: {delete_response.status_code}")
+
+            # Если bundle был создан нами (содержит имя очереди), удаляем его полностью
+            if bundle_id and (queue_key in bundle_name or 'States' in bundle_name):
+                try:
+                    bundle_delete_response = self.session.delete(
+                        f"{self.base_url}/api/admin/customFieldSettings/bundles/state/{bundle_id}"
+                    )
+
+                    if bundle_delete_response.status_code in [200, 204]:
+                        logger.info(f"    ✓ State bundle '{bundle_name}' удален")
+                    else:
+                        logger.debug(f"    ℹ Не удалось удалить bundle (возможно используется в других проектах)")
+                except Exception as e:
+                    logger.debug(f"    ℹ Bundle не удален: {e}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"    ✗ Ошибка удаления state bundle: {e}")
+            return False
+
+    def create_unique_state_bundle(self, base_name: str, statuses: List[Dict], attempt: int = 1) -> Optional[str]:
+        """Создание уникального state bundle с обработкой дублирования"""
+        try:
+            # Генерируем уникальное имя
+            if attempt == 1:
+                bundle_name = base_name
+            else:
+                bundle_name = f"{base_name} v{attempt}"
+
             # Подготавливаем состояния для bundle
             bundle_states = []
             for status in statuses:
@@ -120,6 +190,9 @@ class YouTrackClient:
                 created_bundle = response.json()
                 logger.info(f"    ✓ Создан state bundle: {bundle_name}")
                 return created_bundle.get('id')
+            elif response.status_code == 400 and 'не является уникальным' in response.text and attempt < 10:
+                logger.debug(f"    🔄 Bundle '{bundle_name}' уже существует, пробуем другое имя")
+                return self.create_unique_state_bundle(base_name, statuses, attempt + 1)
             else:
                 logger.warning(f"    ⚠ Не удалось создать bundle {bundle_name}: {response.status_code} - {response.text}")
                 return None
@@ -128,10 +201,10 @@ class YouTrackClient:
             logger.error(f"    ✗ Ошибка создания state bundle: {e}")
             return None
 
-    def replace_state_bundle_for_project(self, project_id: str, bundle_id: str) -> bool:
-        """Замена существующего state bundle проекту на новый"""
+    def assign_state_bundle_to_project(self, project_id: str, bundle_id: str) -> bool:
+        """Назначение state bundle проекту"""
         try:
-            # Сначала находим State field
+            # Находим State field
             response = self.session.get(
                 f"{self.base_url}/api/admin/customFieldSettings/customFields",
                 params={'fields': 'id,name,fieldType', '$top': 100}
@@ -149,36 +222,7 @@ class YouTrackClient:
                 logger.warning(f"    ⚠ Не найдено поле State")
                 return False
 
-            # Проверяем текущие custom fields проекта
-            response = self.session.get(
-                f"{self.base_url}/api/admin/projects/{project_id}/customFields",
-                params={'fields': 'id,field(id,name),bundle(id,name)'}
-            )
-
-            project_state_field_id = None
-            if response.status_code == 200:
-                custom_fields = response.json()
-                for field in custom_fields:
-                    if field.get('field', {}).get('name') == 'State':
-                        project_state_field_id = field.get('id')
-                        break
-
-            # Если поле State уже есть в проекте, обновляем его bundle
-            if project_state_field_id:
-                response = self.session.post(
-                    f"{self.base_url}/api/admin/projects/{project_id}/customFields/{project_state_field_id}",
-                    json={'bundle': {'id': bundle_id}},
-                    params={'fields': 'id,field(name),bundle(name)'}
-                )
-
-                if response.status_code == 200:
-                    logger.info(f"    ✓ State bundle обновлен для проекта")
-                    return True
-                else:
-                    logger.warning(f"    ⚠ Не удалось обновить bundle: {response.status_code}")
-                    # Попробуем добавить как новое поле
-
-            # Добавляем поле State с нашим bundle
+            # Назначаем bundle проекту
             custom_field_data = {
                 'field': {'id': state_field_id},
                 'bundle': {'id': bundle_id}
@@ -194,14 +238,14 @@ class YouTrackClient:
                 logger.info(f"    ✓ State bundle назначен проекту")
                 return True
             elif response.status_code == 409:
-                logger.info(f"    ⚠ State bundle уже назначен проекту")
+                logger.info(f"    ✓ State bundle уже назначен проекту")
                 return True
             else:
                 logger.warning(f"    ⚠ Не удалось назначить bundle: {response.status_code} - {response.text}")
                 return False
 
         except Exception as e:
-            logger.error(f"    ✗ Ошибка замены state bundle: {e}")
+            logger.error(f"    ✗ Ошибка назначения state bundle: {e}")
             return False
 
 def load_config() -> Dict:
@@ -263,6 +307,13 @@ def main():
             skip_count += 1
             continue
 
+        # Удаляем существующий state bundle
+        logger.info(f"  🗑️ Удаляем существующие состояния для проекта {queue_key}")
+        if not youtrack_client.remove_existing_state_bundle(project_id, queue_key):
+            logger.error(f"  ✗ Не удалось удалить существующие состояния")
+            error_count += 1
+            continue
+
         # Получаем статусы из Yandex Tracker
         statuses = yandex_client.get_queue_statuses(queue_key)
 
@@ -272,16 +323,16 @@ def main():
             continue
 
         # Создаем уникальное имя для bundle
-        bundle_name = f"{queue_key} States"
+        bundle_base_name = f"{queue_key} States"
 
-        # Создаем state bundle
-        bundle_id = youtrack_client.create_state_bundle(bundle_name, statuses)
+        # Создаем state bundle с уникальным именем
+        bundle_id = youtrack_client.create_unique_state_bundle(bundle_base_name, statuses)
         if not bundle_id:
             error_count += 1
             continue
 
-        # Назначаем bundle проекту (заменяя существующий если нужно)
-        if youtrack_client.replace_state_bundle_for_project(project_id, bundle_id):
+        # Назначаем bundle проекту
+        if youtrack_client.assign_state_bundle_to_project(project_id, bundle_id):
             success_count += 1
             logger.info(f"  🎉 Статусы успешно настроены для проекта {queue_key}")
         else:
