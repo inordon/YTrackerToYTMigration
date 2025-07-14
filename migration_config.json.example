@@ -1,0 +1,26 @@
+{
+  "yandex_tracker": {
+    "token": "YOUR_YANDEX_TRACKER_TOKEN",
+    "org_id": "YOUR_YANDEX_ORG_ID",
+    "is_cloud_org": true
+  },
+  "youtrack": {
+    "url": "https://your-company.myjetbrains.com",
+    "token": "YOUR_YOUTRACK_TOKEN"
+  },
+  "migration_options": {
+    "migrate_comments": true,
+    "migrate_attachments": false,
+    "batch_size": 50,
+    "rate_limit_delay": 0.5,
+    "max_retries": 3
+  },
+  "filtering": {
+    "specific_queues": [],
+    "exclude_queues": [],
+    "date_range": {
+      "from": null,
+      "to": null
+    }
+  }
+}

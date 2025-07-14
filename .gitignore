@@ -1,0 +1,78 @@
+# Конфигурационные файлы с токенами
+migration_config.json
+
+# Результаты миграции
+user_mapping.json
+project_mapping.json
+issue_mapping.json
+links_report.json
+
+# Резервные копии маппингов
+*_backup*.json
+user_mapping_backup_*.json
+
+# Логи
+*.log
+step*_users.log
+step*_projects.log
+step*_issues.log
+step*_links.log
+migration_master.log
+migrate_missing_users.log
+cleanup.log
+
+# Резервные копии
+*_backup_*.json
+projects_backup_*.json
+users_backup_*.json
+
+# Временные файлы Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Виртуальные окружения
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Скрипты для повторного запуска (генерируются автоматически)
+retry_*.py
